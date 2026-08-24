@@ -1,3 +1,78 @@
+fn bakeUVGradientToBlue obj uvChannel:1 =
+(
+    if classOf obj.baseObject != Editable_Poly do
+        convertToPoly obj
+
+    local vcChannel = 0
+    local faceCount = polyop.getNumFaces obj
+
+    -- Initialize vertex color channel
+    polyop.defaultMapFaces obj vcChannel
+
+    local processedFaces = #{}
+
+    for f = 1 to faceCount do
+    (
+        if not processedFaces[f] do
+        (
+            -- Get complete geometry element
+            local elementFaces = polyop.getElementsUsingFace obj #{f}
+
+            processedFaces += elementFaces
+
+            --------------------------------------------------
+            -- Find UV V min/max for this element
+            --------------------------------------------------
+
+            local minV = 1e9
+            local maxV = -1e9
+
+            for faceIndex in elementFaces do
+            (
+                local uvFace = polyop.getMapFace obj uvChannel faceIndex
+
+                for uvIndex in uvFace do
+                (
+                    local uv = polyop.getMapVert obj uvChannel uvIndex
+
+                    if uv.y < minV do minV = uv.y
+                    if uv.y > maxV do maxV = uv.y
+                )
+            )
+
+            local uvRange = maxV - minV
+
+            --------------------------------------------------
+            -- Paint VC blue from bottom -> top
+            --------------------------------------------------
+
+            for faceIndex in elementFaces do
+            (
+                local uvFace = polyop.getMapFace obj uvChannel faceIndex
+                local vcFace = polyop.getMapFace obj vcChannel faceIndex
+
+                for corner = 1 to uvFace.count do
+                (
+                    local uv = polyop.getMapVert obj uvChannel uvFace[corner]
+
+                    local gradient = 0.0
+
+                    if uvRange > 0.000001 do
+                        gradient = (uv.y - minV) / uvRange
+
+                    gradient = amax 0.0 (amin 1.0 gradient)
+
+                    local vcIndex = vcFace[corner]
+
+                    polyop.setMapVert obj vcChannel vcIndex [0, 0, gradient]
+                )
+            )
+        )
+    )
+
+    update obj
+)
+
 # blendertesting
 messing around with blender
 
