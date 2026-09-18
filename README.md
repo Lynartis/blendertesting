@@ -1,3 +1,247 @@
+
+
+//****************
+// PROGRAM
+//****************
+float4 main(const PS_INPUT i) : SV_TARGET
+{
+    float MAX_IMPULSE_LENGTH = 350.0f;
+    float MAX_IMPULSE_RADIUS = 350.0f;
+
+    uint uImpulses = 0;
+
+    float2 vTotalOffset = float2(0.0f, 0.0f);
+    float fTotalRadius  = 0.0f;
+    float fTotalWeight  = 0.0f;
+
+
+    float2 uv = i.vTex0;
+    uv.y = 1.0f - uv.y;
+
+    float2 vWorld =
+        WORLD_PIVOT +
+        ((uv - float2(0.5f, 0.5f)) * UV_TO_WORLD);
+
+
+    // --------------------------------------------------------
+    // CURRENT IMPULSES
+    // --------------------------------------------------------
+
+    for (uint j = 0; j < MAX_IMPULSES; ++j)
+    {
+        if (j < (uint)IMPULSES)
+        {
+            float2 vDir =
+                vWorld - GET_IMPULSE_POS(j);
+
+            float fSqrDist =
+                1.0f -
+                saturate(
+                    dot(vDir, vDir) *
+                    GET_IMPULSE_RCP_RADIUS(j)
+                );
+
+            if (fSqrDist > 0.0f)
+            {
+                float impulse_radius =
+                    sqrt(
+                        1.0f /
+                        GET_IMPULSE_RCP_RADIUS(j)
+                    );
+
+                // XY vector from impulse center -> current pixel
+                vTotalOffset +=
+                    vDir * fSqrDist;
+
+                // Radius belonging to the same impulse
+                fTotalRadius +=
+                    impulse_radius * fSqrDist;
+
+                fTotalWeight +=
+                    fSqrDist;
+
+                uImpulses++;
+            }
+        }
+    }
+
+
+    // --------------------------------------------------------
+    // PREVIOUS TRAILMAP
+    // --------------------------------------------------------
+
+    float4 vPrev =
+        texHistory.Sample(
+            samplerHistory,
+            i.vTex0 - UV_DISPLACEMENT
+        );
+
+    float fPrevPower =
+        saturate(
+            TrailMap_GetPower(vPrev) - DECAY
+        );
+
+
+    // --------------------------------------------------------
+    // ADD PREVIOUS VALUE WITH DECAY AS ITS WEIGHT
+    // --------------------------------------------------------
+
+    if (fPrevPower > 0.0f)
+    {
+        // Decode previous RG back into world-space XY vector
+        float2 vPrevOffset =
+            (vPrev.rg * 2.0f - 1.0f) *
+            MAX_IMPULSE_LENGTH;
+
+        // Decode previous radius
+        float fPrevRadius =
+            vPrev.b *
+            MAX_IMPULSE_RADIUS;
+
+        vTotalOffset +=
+            vPrevOffset * fPrevPower;
+
+        fTotalRadius +=
+            fPrevRadius * fPrevPower;
+
+        fTotalWeight +=
+            fPrevPower;
+    }
+
+
+    // --------------------------------------------------------
+    // OUTPUT
+    // --------------------------------------------------------
+
+    float2 vRetOffset = float2(0.5f, 0.5f);
+    float fRetRadius  = 0.0f;
+    float fRetPower   = 0.0f;
+
+
+    if (fTotalWeight > 0.0f)
+    {
+        float2 vOffset =
+            vTotalOffset /
+            fTotalWeight;
+
+        float fRadius =
+            fTotalRadius /
+            fTotalWeight;
+
+
+        // Pack signed world-space XY vector into 0..1
+        //
+        // -MAX_IMPULSE_LENGTH -> 0
+        //  0                  -> 0.5
+        // +MAX_IMPULSE_LENGTH -> 1
+        //
+        vRetOffset =
+            saturate(
+                (vOffset / MAX_IMPULSE_LENGTH) *
+                0.5f + 0.5f
+            );
+
+
+        // Pack radius into B
+        //
+        // 0                  -> 0
+        // MAX_IMPULSE_RADIUS -> 1
+        //
+        fRetRadius =
+            saturate(
+                fRadius /
+                MAX_IMPULSE_RADIUS
+            );
+
+
+        // Current impulse refreshes power.
+        // Otherwise history keeps decaying.
+        fRetPower =
+            (uImpulses > 0)
+            ? 1.0f
+            : fPrevPower;
+    }
+
+
+    float4 vRet =
+        float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    vRet.rg = vRetOffset;
+    vRet.b  = fRetRadius;
+    vRet.a  = fRetPower;
+
+    return vRet;
+}
+
+
+
+
+
+
+
+
+float MAX_IMPULSE_LENGTH = 350.0f;
+float MAX_IMPULSE_RADIUS = 350.0f;
+
+
+// XY reconstructed from trailmap RG
+float2 dir_unpack =
+    trailmap.xy * 2.0f - 1.0f;
+
+float3 a =
+    float3(
+        dir_unpack * MAX_IMPULSE_LENGTH,
+        0.0f
+    );
+
+
+// Z reconstructed from actual surface position
+float3 b =
+    float3(
+        0.0f,
+        0.0f,
+        i.vWorld.z
+    );
+
+
+// Full vector from impulse center -> surface pixel
+float3 c =
+    a + b;
+
+
+// Radius reconstructed from B
+float radius =
+    trailmap.b *
+    MAX_IMPULSE_RADIUS;
+
+
+// Full 3D sphere gradient
+float mask =
+    (radius > 0.0001f)
+    ? saturate(
+        1.0f -
+        length(c) / radius
+      )
+    : 0.0f;
+
+
+// Trail decay
+mask *= trailmap.a;
+
+
+DBG_F(mask);
+
+
+
+
+
+
+
+
+---::---
+
+
+
 fn bakeUVGradientToBlue obj uvChannel:1 =
 (
     if classOf obj.baseObject != Editable_Poly do
