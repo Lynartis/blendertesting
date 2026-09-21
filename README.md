@@ -1,6 +1,3 @@
-readme
-
-
 //****************
 // PROGRAM
 //****************
@@ -10,8 +7,13 @@ float4 main( const PS_INPUT i ) : SV_TARGET
 
     uint   uImpulses         = 0;
 
-    float2 vCurrentMaxOffset = float2( 0.0f, 0.0f );
+    // Blended / additive XY field
+    float2 vTotalOffset      = float2( 0.0f, 0.0f );
+    float  fTotalWeight      = 0.0f;
+
+    // Radius logic
     float  fCurrentMaxRadius = 0.0f;
+    float  fPrevRadius       = 0.0f;
 
 
     // --------------------------------------------------------
@@ -53,12 +55,20 @@ float4 main( const PS_INPUT i ) : SV_TARGET
                         GET_IMPULSE_RCP_RADIUS( j )
                     );
 
-                // Keep only the CURRENT biggest sphere
-                if( fRadius > fCurrentMaxRadius )
-                {
-                    fCurrentMaxRadius = fRadius;
-                    vCurrentMaxOffset = vDir;
-                }
+                // Smooth additive / weighted vector field
+                vTotalOffset +=
+                    vDir *
+                    fSqrDist;
+
+                fTotalWeight +=
+                    fSqrDist;
+
+                // Radius keeps the biggest CURRENT one
+                fCurrentMaxRadius =
+                    max(
+                        fCurrentMaxRadius,
+                        fRadius
+                    );
 
                 uImpulses++;
             }
@@ -82,25 +92,33 @@ float4 main( const PS_INPUT i ) : SV_TARGET
             DECAY
         );
 
-    float fPrevRadius = 0.0f;
+
+    // --------------------------------------------------------
+    // PREVIOUS HISTORY CONTRIBUTION
+    // --------------------------------------------------------
 
     if( fPrevPower > 0.0f )
     {
+        float2 vPrevOffset =
+            (vPrev.rg * 2.0f - 1.0f) *
+            MAX_IMPULSE_RADIUS;
+
         fPrevRadius =
             vPrev.b *
             MAX_IMPULSE_RADIUS;
+
+        // History contributes to the blended field
+        vTotalOffset +=
+            vPrevOffset *
+            fPrevPower;
+
+        fTotalWeight +=
+            fPrevPower;
     }
 
 
     // --------------------------------------------------------
-    // OUTPUT SELECTION
-    //
-    // IMPORTANT:
-    // We do NOT mix current and previous data.
-    // RG + B + A must belong to the same sphere.
-    //
-    // If previous sphere is bigger, it wins completely.
-    // If current sphere is bigger/equal, it wins completely.
+    // OUTPUT
     // --------------------------------------------------------
 
     float2 vRetOffset =
@@ -109,48 +127,74 @@ float4 main( const PS_INPUT i ) : SV_TARGET
     float fRetRadius = 0.0f;
     float fRetPower  = 0.0f;
 
+    if( fTotalWeight > 0.0f )
+    {
+        // ----------------------------------------------------
+        // RG
+        //
+        // Blended XY offset field packed into 0..1
+        // ----------------------------------------------------
 
-    // Previous bigger sphere wins completely
-    if( fPrevPower > 0.0f &&
-        fPrevRadius > fCurrentMaxRadius )
-    {
-        vRetOffset = vPrev.rg;
-        fRetRadius = vPrev.b;
-        fRetPower  = fPrevPower;
-    }
-    // Current sphere wins completely
-    else if( uImpulses > 0 )
-    {
+        float2 vOffset =
+            vTotalOffset /
+            fTotalWeight;
+
         vRetOffset =
             saturate(
-                (vCurrentMaxOffset / MAX_IMPULSE_RADIUS) *
+                (vOffset / MAX_IMPULSE_RADIUS) *
                 0.5f +
                 0.5f
             );
 
+
+        // ----------------------------------------------------
+        // B
+        //
+        // Maximum radius wins
+        // ----------------------------------------------------
+
+        float fMaxRadius =
+            max(
+                fCurrentMaxRadius,
+                fPrevRadius
+            );
+
         fRetRadius =
             saturate(
-                fCurrentMaxRadius /
+                fMaxRadius /
                 MAX_IMPULSE_RADIUS
             );
 
-        fRetPower = 1.0f;
-    }
-    // Only previous history remains
-    else if( fPrevPower > 0.0f )
-    {
-        vRetOffset = vPrev.rg;
-        fRetRadius = vPrev.b;
-        fRetPower  = fPrevPower;
+
+        // ----------------------------------------------------
+        // A
+        //
+        // Only reactivate if the CURRENT max radius wins.
+        // This prevents a small new impulse from reactivating
+        // an older larger sphere.
+        // ----------------------------------------------------
+
+        if( uImpulses > 0 )
+        {
+            fRetPower =
+                (fCurrentMaxRadius >= fPrevRadius)
+                ? 1.0f
+                : fPrevPower;
+        }
+        else
+        {
+            fRetPower =
+                fPrevPower;
+        }
     }
 
 
     // --------------------------------------------------------
     // FINAL TRAILMAP
     //
-    // RG = XY offset from sphere center
-    // B  = sphere radius
-    // A  = trail power / decay
+    // RG = blended XY offset field
+    // B  = maximum radius
+    // A  = power / decay
     // --------------------------------------------------------
 
     float4 vRet =
