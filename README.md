@@ -1,426 +1,611 @@
+static const float MIN_POWER         = 0.01f;
+static const float CENTER_EPSILON    = 0.05f;
+static const float CENTER_EPSILON_SQ = CENTER_EPSILON * CENTER_EPSILON;
+
+
 // ============================================================================
-// TRAIL MAP 3D SEARCH - FIRST VERSION
+// HELPERS
 // ============================================================================
+
+bool HasImpulse(float3 sample)
+{
+    return sample.z > MIN_POWER;
+}
+
+
+float3 GetCenter(float3 samplePoint, float3 sample)
+{
+    return float3(
+        samplePoint.xy + sample.xy,
+        0.0f
+    );
+}
+
+
+bool SameCenter(float3 A, float3 B)
+{
+    float2 delta = A.xy - B.xy;
+
+    return dot(delta, delta) <= CENTER_EPSILON_SQ;
+}
+
+
+// ============================================================================
+// TEST ONE CENTER
 //
-// COORDINATE CONVENTION
+// A      = original 3D point
+// X      = center we want to test: C, D1, D2...
+// Source = point where X was discovered
 //
-// A = original 3D vegetation/pixel point (worldPos)
-// B = vertical projection of A onto trail-map plane Z = 0
-// C = first impulse center reconstructed by sampling trail map at B
+// For C:
+//      X      = C
+//      Source = B
 //
-// TrailMap:
-//      R,G = normalized direction from sampled pixel -> impulse center
-//      B   = normalized distance from sampled pixel -> impulse center
-//      A   = impulse power / temporal decay
+// For D1:
+//      X      = D1
+//      Source = point where D1 was found
 //
-// FIRST IDEA:
+// Returns true if X reaches A.
 //
-//      A
-//      |
-//      |
-//      B ---------------- Z = 0
+// If another impulse is found:
+//      D1 / D2 are returned so we can test them afterwards.
+// ============================================================================
+
+bool TestCenter(
+    float3 A,
+    float3 X,
+    float3 Source,
+
+    out float3 D1,
+    out float3 D1Source,
+    out float  D1Power,
+
+    out float3 D2,
+    out float3 D2Source,
+    out float  D2Power)
+{
+    D1 = 0.0f;
+    D1Source = 0.0f;
+    D1Power = 0.0f;
+
+    D2 = 0.0f;
+    D2Source = 0.0f;
+    D2Power = 0.0f;
+
+
+    // ------------------------------------------------------------------------
+    // XA = full 3D vector from candidate X to original point A.
+    //
+    // R = how far X must reach to contain A.
+    // ------------------------------------------------------------------------
+
+    float3 XA = A - X;
+
+    float R = length(XA);
+
+
+    // ------------------------------------------------------------------------
+    // Direction on Z=0 from X toward the point where X was discovered.
+    // ------------------------------------------------------------------------
+
+    float2 XS = Source.xy - X.xy;
+
+    float xsLengthSq = dot(XS, XS);
+
+    float2 XSDir;
+
+    if (xsLengthSq > 1e-8f)
+    {
+        XSDir = XS * rsqrt(xsLengthSq);
+    }
+    else
+    {
+        XSDir = float2(1.0f, 0.0f);
+    }
+
+
+    // ========================================================================
+    // FIRST SIDE
+    //
+    // P1 is exactly distance R from X.
+    // ========================================================================
+
+    float3 P1 = float3(
+        X.xy + XSDir * R,
+        0.0f
+    );
+
+
+    float3 sampleP1 = SamplePoint(P1);
+
+
+    // ------------------------------------------------------------------------
+    // Nothing.
+    //
+    // Simple first-version rule:
+    // X is OUT.
+    // ------------------------------------------------------------------------
+
+    if (!HasImpulse(sampleP1))
+    {
+        return false;
+    }
+    else
+    {
+        float3 centerP1 = GetCenter(P1, sampleP1);
+
+
+        // --------------------------------------------------------------------
+        // P1 gives X.
+        //
+        // distance(X,P1) == distance(X,A)
+        //
+        // Therefore X reaches A.
+        // --------------------------------------------------------------------
+
+        if (SameCenter(centerP1, X))
+        {
+            return true;
+        }
+        else
+        {
+            // ----------------------------------------------------------------
+            // P1 gives another center.
+            //
+            // Call it D1.
+            // X may simply be hidden here.
+            // ----------------------------------------------------------------
+
+            D1 = centerP1;
+            D1Source = P1;
+            D1Power = sampleP1.z;
+
+
+            // ================================================================
+            // SECOND / OPPOSITE SIDE
+            // ================================================================
+
+            float3 P2 = float3(
+                X.xy - XSDir * R,
+                0.0f
+            );
+
+
+            float3 sampleP2 = SamplePoint(P2);
+
+
+            // ---------------------------------------------------------------
+            // Opposite side empty.
+            //
+            // X is OUT.
+            // Keep D1 for later.
+            // ---------------------------------------------------------------
+
+            if (!HasImpulse(sampleP2))
+            {
+                return false;
+            }
+            else
+            {
+                float3 centerP2 = GetCenter(P2, sampleP2);
+
+
+                // -----------------------------------------------------------
+                // Opposite side gives X.
+                //
+                // X reaches A.
+                // -----------------------------------------------------------
+
+                if (SameCenter(centerP2, X))
+                {
+                    return true;
+                }
+                else
+                {
+                    // -------------------------------------------------------
+                    // Opposite side gives something else.
+                    //
+                    // If it is NOT the same D1, call it D2.
+                    // -------------------------------------------------------
+
+                    if (!SameCenter(centerP2, D1))
+                    {
+                        D2 = centerP2;
+                        D2Source = P2;
+                        D2Power = sampleP2.z;
+                    }
+
+
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+
+// ============================================================================
+// MAIN SEARCH
 //
-// Sample B:
+// Explicitly:
 //
 //      B -> C
+//      test C
 //
-// Calculate:
+//      if C fails and found D1:
+//          test D1
 //
-//      CA = A - C
-//      distanceCA = length(CA)
+//      if C fails and found D2:
+//          test D2
 //
-//      CB = normalize(B - C) on the Z=0 plane
-//
-// First test point:
-//
-//      B2 = C + CB * distanceCA
-//
-// Sample B2:
-//
-//      B2 -> C
-//          C is confirmed.
-//          A is inside C.
-//
-//      B2 -> EMPTY
-//          C is OUT using this first approximation.
-//
-//      B2 -> D1
-//          D1 may simply be overwriting C.
-//          Therefore check opposite side:
-//
-//          B3 = C - CB * distanceCA
-//
-//          B3 -> C
-//              C confirmed.
-//
-//          B3 -> EMPTY
-//              C out.
-//              D1 is queued and tested.
-//
-//          B3 -> D1
-//              C out.
-//              D1 queued.
-//
-//          B3 -> D2
-//              C out.
-//              D1 and D2 queued.
-//
-// D1 / D2 use THE EXACT SAME TEST.
-//
-// Example:
-//
-//      candidate = D1
-//      sourcePoint = B2
-//
-//      DA = A - D1
-//      D1B2 = normalize(B2 - D1)
-//      distanceDA = length(DA)
-//
-//      test1 = D1 + D1B2 * distanceDA
-//      test2 = D1 - D1B2 * distanceDA
-//
+// No loops yet.
 // ============================================================================
 
-
-#define TRAIL_MAX_SAMPLES       5
-#define TRAIL_MAX_CANDIDATES    5
-
-#define TRAIL_RESULT_NONE       0
-#define TRAIL_RESULT_FOUND      1
-#define TRAIL_RESULT_BUDGET_END 2
-
-
-static const float TRAIL_MIN_POWER       = 0.03f;
-static const float TRAIL_MAX_DISTANCE    = 3.0f;
-
-// Because RG/B may be 8-bit and reconstructed centers will not be exact.
-static const float TRAIL_CENTER_EPSILON  = 0.05f;
-
-
-// ============================================================================
-// RESOURCES
-// ============================================================================
-
-Texture2D<float4> gTrailMap;
-SamplerState      gTrailSampler;
-
-
-// ============================================================================
-// EXAMPLE TRAIL MAP WORLD -> UV DATA
-//
-// Replace this with your existing GetUVs() implementation if you already
-// have one.
-//
-// XY is the trail-map plane.
-// Z is height above/below the trail-map plane.
-// ============================================================================
-
-cbuffer TrailMapCB : register(b0)
+bool FindTrailImpulse(
+    float3 worldPos,
+    out float3 impulseCenter,
+    out float impulsePower)
 {
-    float2 gTrailWorldMin;
-    float2 gTrailWorldSize;
-};
+    impulseCenter = 0.0f;
+    impulsePower = 0.0f;
 
 
-// Replace this with YOUR existing GetUVs if necessary.
-float2 GetUVs(float2 worldXY)
-{
-    return
-        (worldXY - gTrailWorldMin) /
-        gTrailWorldSize;
+    // ========================================================================
+    // A
+    // ========================================================================
+
+    float3 A = worldPos;
+
+
+    // ========================================================================
+    // B = projection of A onto Z = 0
+    // ========================================================================
+
+    float3 B = float3(
+        A.xy,
+        0.0f
+    );
+
+
+    // ========================================================================
+    // SAMPLE B
+    // ========================================================================
+
+    float3 sampleB = SamplePoint(B);
+
+
+    if (!HasImpulse(sampleB))
+    {
+        // B found nothing.
+        return false;
+    }
+    else
+    {
+        // ====================================================================
+        // C = B + offset stored in RG
+        // ====================================================================
+
+        float3 C = GetCenter(B, sampleB);
+
+        float CPower = sampleB.z;
+
+
+        // --------------------------------------------------------------------
+        // Named vectors exactly matching the concept:
+        // --------------------------------------------------------------------
+
+        float3 BA = A - B;
+        float3 BC = C - B;
+        float3 CA = A - C;
+
+
+        // ====================================================================
+        // Variables for centers discovered while testing C.
+        // ====================================================================
+
+        float3 D1;
+        float3 D1Source;
+        float  D1Power;
+
+        float3 D2;
+        float3 D2Source;
+        float  D2Power;
+
+
+        // ====================================================================
+        // TEST C
+        //
+        // C was discovered from B.
+        // ====================================================================
+
+        bool insideC = TestCenter(
+            A,
+            C,
+            B,
+
+            D1,
+            D1Source,
+            D1Power,
+
+            D2,
+            D2Source,
+            D2Power
+        );
+
+
+        if (insideC)
+        {
+            impulseCenter = C;
+            impulsePower = CPower;
+
+            return true;
+        }
+        else
+        {
+            // =================================================================
+            // C failed.
+            //
+            // If we found D1, test it.
+            // =================================================================
+
+            if (D1Power > MIN_POWER)
+            {
+                float3 E1;
+                float3 E1Source;
+                float  E1Power;
+
+                float3 E2;
+                float3 E2Source;
+                float  E2Power;
+
+
+                bool insideD1 = TestCenter(
+                    A,
+                    D1,
+                    D1Source,
+
+                    E1,
+                    E1Source,
+                    E1Power,
+
+                    E2,
+                    E2Source,
+                    E2Power
+                );
+
+
+                if (insideD1)
+                {
+                    impulseCenter = D1;
+                    impulsePower = D1Power;
+
+                    return true;
+                }
+            }
+
+
+            // =================================================================
+            // D1 did not work.
+            //
+            // If C also discovered a different D2, test D2.
+            // =================================================================
+
+            if (D2Power > MIN_POWER)
+            {
+                float3 E1;
+                float3 E1Source;
+                float  E1Power;
+
+                float3 E2;
+                float3 E2Source;
+                float  E2Power;
+
+
+                bool insideD2 = TestCenter(
+                    A,
+                    D2,
+                    D2Source,
+
+                    E1,
+                    E1Source,
+                    E1Power,
+
+                    E2,
+                    E2Source,
+                    E2Power
+                );
+
+
+                if (insideD2)
+                {
+                    impulseCenter = D2;
+                    impulsePower = D2Power;
+
+                    return true;
+                }
+            }
+
+
+            // C, D1 and D2 did not confirm.
+            return false;
+        }
+    }
 }
 
 
+
+
+
+
+
+
+
+
+A = worldPos
+↓
+B = (A.xy, 0)
+↓
+sample B
+│
+├─ nothing → return false
+│
+└─ C = B + sample.xy
+   │
+   ▼
+   R = length(A - C)
+   Dir = normalize(B - C)
+   │
+   ▼
+   P1 = C + Dir * R
+   │
+   ▼
+   sample P1
+   │
+   ├─ C
+   │   └─ return C
+   │
+   ├─ nothing
+   │   └─ C out
+   │
+   └─ D1
+       │
+       ▼
+       P2 = C - Dir * R
+       │
+       ▼
+       sample P2
+       │
+       ├─ C
+       │   └─ return C
+       │
+       ├─ nothing
+       │   └─ C out, keep D1
+       │
+       ├─ D1
+       │   └─ C out, keep D1
+       │
+       └─ different center
+           └─ C out, keep D1 + D2
+
+Then:
+
+TestCenter(A, D1, D1Source)
+TestCenter(A, D2, D2Source)
+
+
+
+
+
+
+
+
+
+
+
+
 // ============================================================================
-// DATA TYPES
+// SIMPLE TRAILMAP 3D SEARCH - NO LOOPS
+//
+// SamplePoint(worldPoint) is provided externally:
+//
+//      float3 sample = SamplePoint(worldPoint);
+//
+//      sample.xy = direction + magnitude from sample point to impulse center
+//                  (already non-normalized, so it is the complete XY offset)
+//
+//      sample.z  = impulse power
+//
+// Therefore:
+//
+//      center.xy = samplePoint.xy + sample.xy
+//
 // ============================================================================
 
-struct TrailHit
+static const float MIN_POWER          = 0.01f;
+static const float CENTER_EPSILON     = 0.05f;
+static const float CENTER_EPSILON_SQ  = CENTER_EPSILON * CENTER_EPSILON;
+
+
+// ============================================================================
+// DATA
+// ============================================================================
+
+struct Candidate
 {
-    uint valid;
+    uint   valid;
 
-    // World-space position on Z = 0 at which we sampled.
-    float3 samplePoint;
-
-    // Decoded RG.
-    // Direction:
-    //
-    //      samplePoint -> impulseCenter
-    //
-    float2 directionToCenter;
-
-    // Decoded Blue.
-    float distanceToCenter;
-
-    // Alpha.
-    float power;
-
-    // Reconstructed center on Z = 0.
-    float3 center;
+    float3 center;          // C, D1, D2...
+    float3 discoveredFrom;  // B, B2, B3...
+    float  power;
 };
 
 
-struct TrailCandidate
+struct CandidateTest
 {
-    uint valid;
-
-    // C / D1 / D2 / ...
-    float3 center;
-
-    // The world-space Z=0 sample which discovered this candidate.
-    //
-    // C:
-    //      discoveredFrom = B
-    //
-    // D1:
-    //      discoveredFrom = B2
-    //
-    // D2:
-    //      discoveredFrom = B3
-    //
-    float3 discoveredFrom;
-
-    float power;
-};
-
-
-struct CandidateTestResult
-{
-    // 1 = this candidate owns A according to our test.
     uint inside;
 
-    // Candidate discovered on first side.
-    TrailCandidate D1;
-
-    // Candidate discovered on opposite side.
-    TrailCandidate D2;
-
-    // Debug positions.
-    float3 probePositive;
-    float3 probeNegative;
+    // Other impulses found while testing this candidate.
+    Candidate D1;
+    Candidate D2;
 };
 
 
-struct TrailSearchResult
+struct SearchResult
 {
-    uint state;
-
-    uint samplesUsed;
+    uint   found;
 
     float3 center;
-
-    float power;
+    float  power;
 };
 
 
 // ============================================================================
-// DECODE TRAIL MAP
+// HELPERS
 // ============================================================================
 
-float2 DecodeTrailDirection(float2 packedRG)
+bool HasImpulse(float3 sample)
 {
-    // [0,1] -> [-1,1]
-    float2 direction =
-        packedRG * 2.0f - 1.0f;
-
-    float directionLengthSq =
-        dot(direction, direction);
-
-    if (directionLengthSq <= 1e-8f)
-    {
-        return float2(1.0f, 0.0f);
-    }
-
-    return
-        direction *
-        rsqrt(directionLengthSq);
+    return sample.z > MIN_POWER;
 }
 
 
-float DecodeTrailDistance(float packedBlue)
+float3 GetSampleCenter(
+    float3 samplePoint,
+    float3 sample)
 {
-    return
-        packedBlue *
-        TRAIL_MAX_DISTANCE;
+    // sample.xy already contains direction + magnitude.
+    return float3(
+        samplePoint.xy + sample.xy,
+        0.0f
+    );
 }
 
 
-// ============================================================================
-// SAMPLE TRAIL MAP USING A WORLD-SPACE Z=0 POSITION
-// ============================================================================
-
-TrailHit SampleTrailMapWorld(float3 worldPoint)
+bool SameCenter(
+    float3 A,
+    float3 B)
 {
-    TrailHit hit =
-        (TrailHit)0;
-
-
-    // Make absolutely sure this lookup is on the trail-map plane.
-    worldPoint.z = 0.0f;
-
-    hit.samplePoint =
-        worldPoint;
-
-
-    // --------------------------------------------------------
-    // WORLD XY -> TRAIL MAP UV
-    // --------------------------------------------------------
-
-    float2 uv =
-        GetUVs(worldPoint.xy);
-
-
-    if (
-        any(uv < 0.0f) ||
-        any(uv > 1.0f)
-    )
-    {
-        return hit;
-    }
-
-
-    // --------------------------------------------------------
-    // SAMPLE
-    // --------------------------------------------------------
-
-    float4 trail =
-        gTrailMap.SampleLevel(
-            gTrailSampler,
-            uv,
-            0.0f
-        );
-
-
-    // --------------------------------------------------------
-    // ALPHA = POWER / DECAY
-    //
-    // Dead impulse = empty for this first implementation.
-    // --------------------------------------------------------
-
-    if (trail.a <= TRAIL_MIN_POWER)
-    {
-        return hit;
-    }
-
-
-    hit.valid =
-        1;
-
-
-    // --------------------------------------------------------
-    // RG
-    // --------------------------------------------------------
-
-    hit.directionToCenter =
-        DecodeTrailDirection(
-            trail.rg
-        );
-
-
-    // --------------------------------------------------------
-    // BLUE
-    // --------------------------------------------------------
-
-    hit.distanceToCenter =
-        DecodeTrailDistance(
-            trail.b
-        );
-
-
-    // --------------------------------------------------------
-    // ALPHA
-    // --------------------------------------------------------
-
-    hit.power =
-        trail.a;
-
-
-    // --------------------------------------------------------
-    // RECONSTRUCT CENTER
-    //
-    // center =
-    //      samplePosition +
-    //      directionToCenter *
-    //      distanceToCenter
-    // --------------------------------------------------------
-
-    hit.center =
-        float3(
-            worldPoint.xy +
-            hit.directionToCenter *
-            hit.distanceToCenter,
-
-            0.0f
-        );
-
-
-    return hit;
-}
-
-
-// ============================================================================
-// CENTER COMPARISON
-// ============================================================================
-
-bool SameTrailCenter(
-    float3 centerA,
-    float3 centerB)
-{
-    float2 delta =
-        centerA.xy -
-        centerB.xy;
-
+    float2 delta = A.xy - B.xy;
 
     return
         dot(delta, delta) <=
-        TRAIL_CENTER_EPSILON *
-        TRAIL_CENTER_EPSILON;
+        CENTER_EPSILON_SQ;
 }
 
 
-// ============================================================================
-// MAKE CANDIDATE FROM TRAIL MAP HIT
-// ============================================================================
-
-TrailCandidate MakeTrailCandidate(
-    TrailHit hit)
+Candidate MakeCandidate(
+    float3 samplePoint,
+    float3 sample)
 {
-    TrailCandidate candidate =
-        (TrailCandidate)0;
+    Candidate candidate = (Candidate)0;
 
-
-    if (!hit.valid)
-    {
+    if (!HasImpulse(sample))
         return candidate;
-    }
 
-
-    candidate.valid =
-        1;
-
-
-    candidate.center =
-        hit.center;
-
-
-    // This is important.
-    //
-    // The candidate remembers WHERE it was discovered.
-    //
-    // C:
-    //      discoveredFrom = B
-    //
-    // D1:
-    //      discoveredFrom = B2
-    //
-    // This gives us the line direction when we test the candidate.
-    candidate.discoveredFrom =
-        hit.samplePoint;
-
-
-    candidate.power =
-        hit.power;
-
+    candidate.valid          = 1;
+    candidate.center         = GetSampleCenter(samplePoint, sample);
+    candidate.discoveredFrom = samplePoint;
+    candidate.power          = sample.z;
 
     return candidate;
 }
@@ -429,490 +614,264 @@ TrailCandidate MakeTrailCandidate(
 // ============================================================================
 // TEST ONE CANDIDATE
 //
-// For the first candidate:
+// Example for C:
 //
-//      A             = original worldPos
-//      candidate     = C
-//      sourcePoint   = B
+//      A      = original worldPos
+//      X      = C
+//      Source = B
 //
-// For D1:
+//      XA = A - X
+//      R  = length(XA)
 //
-//      A             = original worldPos
-//      candidate     = D1
-//      sourcePoint   = B2
+//      XS = Source - X
+//      Dir = normalize(XS.xy)
 //
-// Same algorithm in both cases.
+//      P1 = X + Dir * R
+//
+//      Sample P1:
+//
+//          X       -> A is inside X
+//          Nothing -> X is outside
+//          D1      -> test opposite side
+//
+//      P2 = X - Dir * R
+//
+//      Sample P2:
+//
+//          X       -> A is inside X
+//          Nothing -> X outside, keep D1
+//          D1      -> X outside, keep D1
+//          D2      -> X outside, keep D1 + D2
+//
+// The exact same function works for D:
+//
+//      X      = D
+//      Source = the point where D was discovered
+//
 // ============================================================================
 
-CandidateTestResult TestCandidate(
+CandidateTest TestCandidate(
     float3 A,
-    TrailCandidate candidate,
-    inout uint samplesUsed)
+    Candidate X)
 {
-    CandidateTestResult result =
-        (CandidateTestResult)0;
+    CandidateTest result = (CandidateTest)0;
 
-
-    if (!candidate.valid)
-    {
+    if (!X.valid)
         return result;
-    }
 
 
-    // ========================================================================
-    // CURRENT CENTER
+    // ------------------------------------------------------------------------
+    // XA
     //
-    // First iteration:
-    //
-    //      C = candidate.center
-    //
-    // Later:
-    //
-    //      D = candidate.center
-    // ========================================================================
+    // Full 3D distance from candidate center X to original point A.
+    // ------------------------------------------------------------------------
 
-    float3 C =
-        candidate.center;
+    float3 XA = A - X.center;
+
+    float radiusToA =
+        length(XA);
 
 
-    // ========================================================================
-    // POINT WHICH DISCOVERED C
+    // ------------------------------------------------------------------------
+    // XS
     //
-    // First iteration:
+    // Direction on Z=0 from X toward the point where X was discovered.
     //
-    //      B = candidate.discoveredFrom
+    // For C:
+    //      X      = C
+    //      Source = B
     //
     // For D1:
-    //
-    //      B = B2
-    //
-    // For D2:
-    //
-    //      B = B3
-    // ========================================================================
+    //      X      = D1
+    //      Source = B2
+    // ------------------------------------------------------------------------
 
-    float3 B =
-        candidate.discoveredFrom;
+    float2 XS =
+        X.discoveredFrom.xy -
+        X.center.xy;
 
+    float xsLengthSq =
+        dot(XS, XS);
 
-    // Force both to plane.
-    C.z = 0.0f;
-    B.z = 0.0f;
+    float2 XSDir;
 
-
-    // ========================================================================
-    // CA
-    //
-    // Full 3D vector from candidate center C to original point A.
-    // ========================================================================
-
-    float3 CA =
-        A - C;
-
-
-    // Full 3D distance C -> A.
-    float distanceCA =
-        length(CA);
-
-
-    // ========================================================================
-    // CB
-    //
-    // Direction from C toward B on Z = 0.
-    // ========================================================================
-
-    float2 CB =
-        B.xy -
-        C.xy;
-
-
-    float cbLengthSq =
-        dot(CB, CB);
-
-
-    float2 directionCB;
-
-
-    if (cbLengthSq > 1e-8f)
-    {
-        directionCB =
-            CB *
-            rsqrt(cbLengthSq);
-    }
+    if (xsLengthSq > 1e-8f)
+        XSDir = XS * rsqrt(xsLengthSq);
     else
-    {
-        // C and B are exactly the same point.
-        //
-        // Because the footprint is circular, any direction
-        // on the plane is valid.
-        directionCB =
-            float2(
-                1.0f,
-                0.0f
-            );
-    }
+        XSDir = float2(1.0f, 0.0f);
 
 
     // ========================================================================
-    // B2
+    // FIRST SIDE
     //
-    // First test point.
-    //
-    // Start at C.
-    // Travel toward B.
-    // Travel exactly the 3D distance C -> A.
-    //
-    // Therefore:
-    //
-    //      distance(C, B2) == distance(C, A)
-    //
+    // P1 is radiusToA away from X, along the X -> Source line.
     // ========================================================================
 
-    float3 B2 =
+    float3 P1 =
         float3(
-            C.xy +
-            directionCB *
-            distanceCA,
-
+            X.center.xy +
+            XSDir * radiusToA,
             0.0f
         );
 
 
-    result.probePositive =
-        B2;
+    float3 sampleP1 =
+        SamplePoint(P1);
 
 
-    // ========================================================================
-    // SAMPLE B2
-    // ========================================================================
+    // ------------------------------------------------------------------------
+    // Nothing at P1.
+    //
+    // First/simple rule:
+    //      X does not reach A.
+    // ------------------------------------------------------------------------
 
-    if (
-        samplesUsed >=
-        TRAIL_MAX_SAMPLES
-    )
+    if (!HasImpulse(sampleP1))
     {
+        result.inside = 0;
         return result;
     }
 
 
-    TrailHit hitB2 =
-        SampleTrailMapWorld(
-            B2
+    float3 centerP1 =
+        GetSampleCenter(
+            P1,
+            sampleP1
         );
 
 
-    samplesUsed++;
+    // ------------------------------------------------------------------------
+    // P1 gives X.
+    //
+    // distance(X,P1) == distance(X,A)
+    //
+    // Therefore X reaches A.
+    // ------------------------------------------------------------------------
 
-
-    // ========================================================================
-    // CASE 1
-    //
-    // B2 gives C.
-    //
-    // Because:
-    //
-    //      distance(C, B2) == distance(C, A)
-    //
-    // and C owns B2:
-    //
-    //      realRadius(C) >= distance(C, A)
-    //
-    // therefore A is inside C.
-    // ========================================================================
-
-    if (
-        hitB2.valid &&
-        SameTrailCenter(
-            hitB2.center,
-            C
-        )
-    )
+    if (SameCenter(centerP1, X.center))
     {
-        result.inside =
-            1;
-
+        result.inside = 1;
         return result;
     }
 
 
-    // ========================================================================
-    // CASE 2
-    //
-    // B2 is EMPTY.
-    //
-    // YOUR FIRST IMPLEMENTATION RULE:
-    //
-    //      C is OUT.
-    //
-    // We do NOT test the opposite side.
-    //
-    // This is intentionally the simple first approximation.
-    // ========================================================================
-
-    if (!hitB2.valid)
-    {
-        result.inside =
-            0;
-
-        return result;
-    }
-
-
-    // ========================================================================
-    // CASE 3
-    //
-    // B2 contains something, but it is NOT C.
+    // ------------------------------------------------------------------------
+    // P1 gives another impulse.
     //
     // Call it D1.
     //
-    // D1 may be overwriting C at B2.
-    //
-    // Therefore we cannot reject C yet.
-    //
-    // We now check the opposite side.
-    // ========================================================================
+    // X may simply be hidden by D1, so test the opposite side.
+    // ------------------------------------------------------------------------
 
-    TrailCandidate D1 =
-        MakeTrailCandidate(
-            hitB2
+    result.D1 =
+        MakeCandidate(
+            P1,
+            sampleP1
         );
 
 
-    result.D1 =
-        D1;
-
-
     // ========================================================================
-    // B3
-    //
-    // Opposite direction from C.
-    //
-    //      B2 = C + directionCB * distanceCA
-    //      B3 = C - directionCB * distanceCA
-    //
+    // OPPOSITE SIDE
     // ========================================================================
 
-    float3 B3 =
+    float3 P2 =
         float3(
-            C.xy -
-            directionCB *
-            distanceCA,
-
+            X.center.xy -
+            XSDir * radiusToA,
             0.0f
         );
 
 
-    result.probeNegative =
-        B3;
+    float3 sampleP2 =
+        SamplePoint(P2);
 
 
-    // ========================================================================
-    // SAMPLE B3
-    // ========================================================================
+    // ------------------------------------------------------------------------
+    // Opposite side empty.
+    //
+    // X is considered outside.
+    // D1 remains available.
+    // ------------------------------------------------------------------------
 
-    if (
-        samplesUsed >=
-        TRAIL_MAX_SAMPLES
-    )
+    if (!HasImpulse(sampleP2))
     {
+        result.inside = 0;
         return result;
     }
 
 
-    TrailHit hitB3 =
-        SampleTrailMapWorld(
-            B3
+    float3 centerP2 =
+        GetSampleCenter(
+            P2,
+            sampleP2
         );
 
 
-    samplesUsed++;
-
-
-    // ========================================================================
-    // CASE 3A
+    // ------------------------------------------------------------------------
+    // Opposite side gives X.
     //
-    // Opposite side gives C.
-    //
-    // C IS CONFIRMED.
-    // ========================================================================
+    // X reaches A.
+    // ------------------------------------------------------------------------
 
-    if (
-        hitB3.valid &&
-        SameTrailCenter(
-            hitB3.center,
-            C
-        )
-    )
+    if (SameCenter(centerP2, X.center))
     {
-        result.inside =
-            1;
-
+        result.inside = 1;
         return result;
     }
 
 
-    // ========================================================================
-    // CASE 3B
+    // ------------------------------------------------------------------------
+    // Opposite side gives something else.
     //
-    // Opposite side is empty.
+    // If it is the same D1, don't store it twice.
     //
-    // C is OUT according to this first implementation.
-    //
-    // D1 remains available for the search queue.
-    // ========================================================================
+    // Otherwise call it D2.
+    // ------------------------------------------------------------------------
 
-    if (!hitB3.valid)
-    {
-        result.inside =
-            0;
-
-        return result;
-    }
-
-
-    // ========================================================================
-    // CASE 3C
-    //
-    // Opposite side contains another center.
-    //
-    // It could be:
-    //
-    //      same D1
-    //
-    // or:
-    //
-    //      another D2
-    //
-    // If it is the same D1, we don't need to queue it twice.
-    // ========================================================================
-
-    if (
-        !SameTrailCenter(
-            hitB3.center,
-            D1.center
-        )
-    )
+    if (!SameCenter(centerP2, result.D1.center))
     {
         result.D2 =
-            MakeTrailCandidate(
-                hitB3
+            MakeCandidate(
+                P2,
+                sampleP2
             );
     }
 
 
-    // Neither B2 nor B3 gave C.
-    //
-    // C is OUT according to this first/simple rule.
-    result.inside =
-        0;
-
+    result.inside = 0;
 
     return result;
 }
 
 
 // ============================================================================
-// CHECK WHETHER A CANDIDATE IS ALREADY IN OUR QUEUE
+// COMPLETE FIRST VERSION - NO LOOPS
+//
+// We explicitly do:
+//
+//      B -> C
+//      test C
+//
+//      if needed:
+//          test D1
+//
+//      if needed:
+//          test D2
+//
+// New candidates discovered while testing D1/D2 are intentionally NOT
+// followed yet. Adding that repetition is the next step where this becomes
+// a tiny queue/loop.
 // ============================================================================
 
-bool CandidateAlreadyExists(
-    TrailCandidate candidates[TRAIL_MAX_CANDIDATES],
-    uint candidateCount,
-    TrailCandidate candidate)
-{
-    if (!candidate.valid)
-    {
-        return true;
-    }
-
-
-    [unroll]
-    for (
-        uint i = 0;
-        i < TRAIL_MAX_CANDIDATES;
-        ++i)
-    {
-        if (i >= candidateCount)
-        {
-            break;
-        }
-
-
-        if (
-            SameTrailCenter(
-                candidates[i].center,
-                candidate.center
-            )
-        )
-        {
-            return true;
-        }
-    }
-
-
-    return false;
-}
-
-
-// ============================================================================
-// PUSH D1 / D2 INTO THE SEARCH QUEUE
-// ============================================================================
-
-void PushCandidate(
-    inout TrailCandidate candidates[TRAIL_MAX_CANDIDATES],
-    inout uint candidateCount,
-    TrailCandidate candidate)
-{
-    if (!candidate.valid)
-    {
-        return;
-    }
-
-
-    if (
-        candidateCount >=
-        TRAIL_MAX_CANDIDATES
-    )
-    {
-        return;
-    }
-
-
-    if (
-        CandidateAlreadyExists(
-            candidates,
-            candidateCount,
-            candidate
-        )
-    )
-    {
-        return;
-    }
-
-
-    candidates[candidateCount] =
-        candidate;
-
-
-    candidateCount++;
-}
-
-
-// ============================================================================
-// FULL SEARCH
-// ============================================================================
-
-TrailSearchResult FindTrailImpulse(
+SearchResult FindTrailImpulse(
     float3 worldPos)
 {
-    TrailSearchResult result =
-        (TrailSearchResult)0;
+    SearchResult result = (SearchResult)0;
 
 
     // ========================================================================
     // A
-    //
-    // Original point.
+    // Original 3D point.
     // ========================================================================
 
     float3 A =
@@ -921,10 +880,7 @@ TrailSearchResult FindTrailImpulse(
 
     // ========================================================================
     // B
-    //
-    // Vertical projection of A onto Z = 0.
-    //
-    // BA = A - B
+    // Project A vertically onto Z = 0.
     // ========================================================================
 
     float3 B =
@@ -934,613 +890,245 @@ TrailSearchResult FindTrailImpulse(
         );
 
 
-    float3 BA =
-        A - B;
-
-
-    uint samplesUsed =
-        0;
-
-
     // ========================================================================
     // SAMPLE B
     // ========================================================================
 
-    TrailHit hitB =
-        SampleTrailMapWorld(
-            B
-        );
+    float3 sampleB =
+        SamplePoint(B);
 
 
-    samplesUsed++;
+    // ------------------------------------------------------------------------
+    // B gives nothing.
+    // ------------------------------------------------------------------------
 
-
-    // Nothing at B.
-    if (!hitB.valid)
+    if (!HasImpulse(sampleB))
     {
-        result.state =
-            TRAIL_RESULT_NONE;
-
-        result.samplesUsed =
-            samplesUsed;
-
+        result.found = 0;
         return result;
     }
-
-
-    // ========================================================================
-    // C
-    //
-    // Reconstructed from:
-    //
-    //      B + RG_direction * Blue_distance
-    // ========================================================================
-
-    TrailCandidate C =
-        MakeTrailCandidate(
-            hitB
-        );
-
-
-    // ------------------------------------------------------------------------
-    // Named vectors for debugging / RenderDoc.
-    // ------------------------------------------------------------------------
-
-    float3 BC =
-        C.center - B;
-
-    float3 CB =
-        B - C.center;
-
-    float3 CA =
-        A - C.center;
-
-
-    // Suppress unused warnings if these are currently only debug variables.
-    BA = BA;
-    BC = BC;
-    CB = CB;
-    CA = CA;
-
-
-    // ========================================================================
-    // CANDIDATE QUEUE
-    //
-    // Initially:
-    //
-    //      candidates[0] = C
-    //
-    // Later:
-    //
-    //      candidates[1] = D1
-    //      candidates[2] = D2
-    //
-    // Each candidate contains the point which discovered it, so the exact
-    // same TestCandidate() function can be used recursively/iteratively.
-    // ========================================================================
-
-    TrailCandidate candidates[TRAIL_MAX_CANDIDATES];
-
-
-    [unroll]
-    for (
-        uint i = 0;
-        i < TRAIL_MAX_CANDIDATES;
-        ++i)
+    else
     {
-        candidates[i] =
-            (TrailCandidate)0;
-    }
-
-
-    uint candidateCount =
-        0;
-
-
-    uint candidateIndex =
-        0;
-
-
-    PushCandidate(
-        candidates,
-        candidateCount,
-        C
-    );
-
-
-    // ========================================================================
-    // SEARCH LOOP
-    // ========================================================================
-
-    [loop]
-    while (
-        candidateIndex < candidateCount &&
-        samplesUsed < TRAIL_MAX_SAMPLES)
-    {
-        TrailCandidate current =
-            candidates[candidateIndex];
-
-
-        // --------------------------------------------------------------------
-        // Test:
+        // ====================================================================
+        // B gives C.
         //
-        //      C
-        //      then potentially D1
-        //      then potentially D2
-        //
-        // all using exactly the same routine.
-        // --------------------------------------------------------------------
+        // C = B + sampleB.xy
+        // ====================================================================
 
-        CandidateTestResult test =
+        Candidate C =
+            MakeCandidate(
+                B,
+                sampleB
+            );
+
+
+        // Useful conceptual vectors:
+        //
+        // BA = A - B
+        // BC = C - B
+        // CA = A - C
+
+        float3 BA =
+            A - B;
+
+        float3 BC =
+            C.center - B;
+
+        float3 CA =
+            A - C.center;
+
+
+        // ====================================================================
+        // TEST C
+        // ====================================================================
+
+        CandidateTest testC =
             TestCandidate(
                 A,
-                current,
-                samplesUsed
+                C
             );
 
 
         // --------------------------------------------------------------------
-        // Current candidate confirmed.
+        // C reaches A.
         // --------------------------------------------------------------------
 
-        if (test.inside)
+        if (testC.inside)
         {
-            result.state =
-                TRAIL_RESULT_FOUND;
-
-
-            result.samplesUsed =
-                samplesUsed;
-
-
-            result.center =
-                current.center;
-
-
-            result.power =
-                current.power;
-
+            result.found  = 1;
+            result.center = C.center;
+            result.power  = C.power;
 
             return result;
         }
-
-
-        // --------------------------------------------------------------------
-        // Candidate did not contain A according to this first implementation.
-        //
-        // But its B2/B3 samples may have revealed D1 and D2.
-        // --------------------------------------------------------------------
-
-        PushCandidate(
-            candidates,
-            candidateCount,
-            test.D1
-        );
-
-
-        PushCandidate(
-            candidates,
-            candidateCount,
-            test.D2
-        );
-
-
-        candidateIndex++;
-    }
-
-
-    // ========================================================================
-    // FINISHED
-    // ========================================================================
-
-    result.samplesUsed =
-        samplesUsed;
-
-
-    if (
-        samplesUsed >= TRAIL_MAX_SAMPLES &&
-        candidateIndex < candidateCount
-    )
-    {
-        result.state =
-            TRAIL_RESULT_BUDGET_END;
-    }
-    else
-    {
-        result.state =
-            TRAIL_RESULT_NONE;
-    }
-
-
-    return result;
-}
-
-
-// ============================================================================
-// EXAMPLE VEGETATION VERTEX USAGE
-// ============================================================================
-
-void ApplyTrailImpulse(
-    float3 worldPos,
-    out float impulsePower,
-    out float3 impulseCenter,
-    out uint debugState,
-    out uint debugSamples)
-{
-    TrailSearchResult trailResult =
-        FindTrailImpulse(
-            worldPos
-        );
-
-
-    debugState =
-        trailResult.state;
-
-
-    debugSamples =
-        trailResult.samplesUsed;
-
-
-    impulsePower =
-        0.0f;
-
-
-    impulseCenter =
-        float3(
-            0.0f,
-            0.0f,
-            0.0f
-        );
-
-
-    if (
-        trailResult.state ==
-        TRAIL_RESULT_FOUND
-    )
-    {
-        impulsePower =
-            trailResult.power;
-
-
-        impulseCenter =
-            trailResult.center;
-    }
-}
-
-
-
-
-
-
-
-
-
-
-// ============================================================================
-// TRAIL MAP 3D SEARCH - FIRST VERSION
-// ============================================================================
-//
-// COORDINATE CONVENTION
-//
-// A = original 3D vegetation/pixel point (worldPos)
-// B = vertical projection of A onto trail-map plane Z = 0
-// C = first impulse center reconstructed by sampling trail map at B
-//
-// TrailMap:
-//      R,G = normalized direction from sampled pixel -> impulse center
-//      B   = normalized distance from sampled pixel -> impulse center
-//      A   = impulse power / temporal decay
-//
-// FIRST IDEA:
-//
-//      A
-//      |
-//      |
-//      B ---------------- Z = 0
-//
-// Sample B:
-//
-//      B -> C
-//
-// Calculate:
-//
-//      CA = A - C
-//      distanceCA = length(CA)
-//
-//      CB = normalize(B - C) on the Z=0 plane
-//
-// First test point:
-//
-//      B2 = C + CB * distanceCA
-//
-// Sample B2:
-//
-//      B2 -> C
-//          C is confirmed.
-//          A is inside C.
-//
-//      B2 -> EMPTY
-//          C is OUT using this first approximation.
-//
-//      B2 -> D1
-//          D1 may simply be overwriting C.
-//          Therefore check opposite side:
-//
-//          B3 = C - CB * distanceCA
-//
-//          B3 -> C
-//              C confirmed.
-//
-//          B3 -> EMPTY
-//              C out.
-//              D1 is queued and tested.
-//
-//          B3 -> D1
-//              C out.
-//              D1 queued.
-//
-//          B3 -> D2
-//              C out.
-//              D1 and D2 queued.
-//
-// D1 / D2 use THE EXACT SAME TEST.
-//
-// Example
-
-
-
-
-
-
-
-
-
-//****************
-// PROGRAM
-//****************
-float4 main( const PS_INPUT i ) : SV_TARGET
-{
-    float MAX_IMPULSE_RADIUS = 350.0f;
-
-    uint uImpulses = 0;
-
-    float2 vTotalDir = float2( 0.0f, 0.0f );
-    float fMaxRadius = 0.0f;
-    float fRetRadius = 0.0f;
-    float fRetPower = 0.0f;
-
-
-    // --------------------------------------------------------
-    // TRAILMAP PIXEL -> WORLD XY
-    // --------------------------------------------------------
-
-    float2 uv = i.vTex0;
-    uv.y = 1.0f - uv.y;
-
-    float2 vWorld = WORLD_PIVOT + ((uv - float2( 0.5f, 0.5f )) * UV_TO_WORLD);
-
-
-    // --------------------------------------------------------
-    // CURRENT IMPULSES
-    // --------------------------------------------------------
-
-    for( uint j = 0; j < MAX_IMPULSES; ++j )
-    {
-        if( j < (uint)IMPULSES )
-        {
-            float2 vDir = vWorld - GET_IMPULSE_POS( j );
-            float fSqrDist = 1.0f - saturate( dot( vDir, vDir ) * GET_IMPULSE_RCP_RADIUS( j ) );
-
-            if( fSqrDist > 0.0f )
-            {
-                float fRadius = sqrt( 1.0f / GET_IMPULSE_RCP_RADIUS( j ) );
-
-                vTotalDir += vDir * fSqrDist;
-                uImpulses++;
-                fMaxRadius = max( fMaxRadius, fRadius );
-            }
-        }
-    }
-
-
-    // --------------------------------------------------------
-    // PREVIOUS TRAILMAP
-    // --------------------------------------------------------
-
-    float4 vPrev = texHistory.Sample( samplerHistory, i.vTex0 - UV_DISPLACEMENT );
-
-    float fPrevPowerRaw = TrailMap_GetPower( vPrev );
-    float fPrevPower = saturate( fPrevPowerRaw - DECAY );
-
-    float fPrevRadius = 0.0f;
-
-    if( fPrevPowerRaw > 0.0001f )
-    {
-        float fDecayRatio = fPrevPower / fPrevPowerRaw;
-        fPrevRadius = vPrev.b * fDecayRatio;
-    }
-
-
-    // --------------------------------------------------------
-    // OUTPUT
-    // --------------------------------------------------------
-
-    float2 vRetDir = float2( 0.5f, 0.5f );
-
-    if( uImpulses > 0 )
-    {
-        // Original structure:
-        // current impulse writes current result
-        float2 vAvgDir = vTotalDir / uImpulses;
-        float fCurrentRadius = saturate( fMaxRadius / MAX_IMPULSE_RADIUS );
-
-        vRetDir = saturate( (vAvgDir / MAX_IMPULSE_RADIUS) * 0.5f + 0.5f );
-
-        // If previous decayed radius is still bigger, keep the whole previous sphere
-        // so a smaller current impulse cannot reactivate or cut it.
-        if( fPrevPower > 0.0f && fPrevRadius > fCurrentRadius )
-        {
-            vRetDir = vPrev.rg;
-            fRetRadius = fPrevRadius;
-            fRetPower = fPrevPower;
-        }
         else
         {
-            fRetRadius = fCurrentRadius;
-            fRetPower = 1.0f;
-        }
-    }
-    else
-    {
-        // No current impulse: keep previous sphere, but both power and radius decay
-        vRetDir = vPrev.rg;
-        fRetRadius = fPrevRadius;
-        fRetPower = fPrevPower;
-    }
+            // =================================================================
+            // C did not confirm.
+            //
+            // Did testing C discover D1?
+            // =================================================================
 
-
-    // --------------------------------------------------------
-    // FINAL TRAILMAP
-    //
-    // RG = packed non-normalized XY offset
-    // B  = packed radius
-    // A  = power / decay
-    // --------------------------------------------------------
-
-    float4 vRet = float4( 0.0f, 0.0f, 0.0f, 0.0f );
-
-    vRet.rg = vRetDir;
-    vRet.b = fRetRadius;
-    vRet.a = fRetPower;
-
-    return vRet;
-}
-
-
-
-
-
-test
-//****************
-// PROGRAM
-//****************
-float4 main( const PS_INPUT i ) : SV_TARGET
-{
-    float MAX_IMPULSE_RADIUS = 350.0f;
-
-    uint uImpulses = 0;
-
-    float2 vTotalDir = float2( 0.0f, 0.0f );
-    float fMaxRadius = 0.0f;
-    float fRetRadius = 0.0f;
-    float fRetPower = 0.0f;
-
-
-    // --------------------------------------------------------
-    // TRAILMAP PIXEL -> WORLD XY
-    // --------------------------------------------------------
-
-    float2 uv = i.vTex0;
-    uv.y = 1.0f - uv.y;
-
-    float2 vWorld = WORLD_PIVOT + ((uv - float2( 0.5f, 0.5f )) * UV_TO_WORLD);
-
-
-    // --------------------------------------------------------
-    // CURRENT IMPULSES
-    // --------------------------------------------------------
-
-    for( uint j = 0; j < MAX_IMPULSES; ++j )
-    {
-        if( j < (uint)IMPULSES )
-        {
-            float2 vDir = vWorld - GET_IMPULSE_POS( j );
-
-            float fSqrDist = 1.0f - saturate( dot( vDir, vDir ) * GET_IMPULSE_RCP_RADIUS( j ) );
-
-            if( fSqrDist > 0.0f )
+            if (testC.D1.valid)
             {
-                float fRadius = sqrt( 1.0f / GET_IMPULSE_RCP_RADIUS( j ) );
+                Candidate D1 =
+                    testC.D1;
 
-                vTotalDir += vDir * fSqrDist;
 
-                uImpulses++;
+                // Conceptually:
+                //
+                // DA = A - D1
+                //
+                // D1.discoveredFrom is automatically the point
+                // where D1 was found.
 
-                fMaxRadius = max( fMaxRadius, fRadius );
+                float3 D1A =
+                    A - D1.center;
+
+
+                CandidateTest testD1 =
+                    TestCandidate(
+                        A,
+                        D1
+                    );
+
+
+                // -------------------------------------------------------------
+                // D1 reaches A.
+                // -------------------------------------------------------------
+
+                if (testD1.inside)
+                {
+                    result.found  = 1;
+                    result.center = D1.center;
+                    result.power  = D1.power;
+
+                    return result;
+                }
             }
+
+
+            // =================================================================
+            // D1 didn't confirm or didn't exist.
+            //
+            // Test D2 if C discovered a second different candidate.
+            // =================================================================
+
+            if (testC.D2.valid)
+            {
+                Candidate D2 =
+                    testC.D2;
+
+
+                float3 D2A =
+                    A - D2.center;
+
+
+                CandidateTest testD2 =
+                    TestCandidate(
+                        A,
+                        D2
+                    );
+
+
+                // -------------------------------------------------------------
+                // D2 reaches A.
+                // -------------------------------------------------------------
+
+                if (testD2.inside)
+                {
+                    result.found  = 1;
+                    result.center = D2.center;
+                    result.power  = D2.power;
+
+                    return result;
+                }
+            }
+
+
+            // =================================================================
+            // C, D1 and D2 all failed.
+            // =================================================================
+
+            result.found = 0;
+
+            return result;
         }
     }
-
-
-    // --------------------------------------------------------
-    // PREVIOUS TRAILMAP
-    // --------------------------------------------------------
-
-    float4 vPrev = texHistory.Sample( samplerHistory, i.vTex0 - UV_DISPLACEMENT );
-
-    float fPrevPower = saturate( TrailMap_GetPower( vPrev ) - DECAY );
-
-
-    // --------------------------------------------------------
-    // OUTPUT
-    // --------------------------------------------------------
-
-    float2 vRetDir = float2( 0.5f, 0.5f );
-
-    if( uImpulses > 0 )
-    {
-        // Keep the original accumulation style, but RG is now
-        // NON-normalized so its magnitude is preserved.
-        float2 vAvgDir = vTotalDir / uImpulses;
-
-        vRetDir = saturate( (vAvgDir / MAX_IMPULSE_RADIUS) * 0.5f + 0.5f );
-
-        // Current maximum radius packed into B.
-        float fCurrentRadius = saturate( fMaxRadius / MAX_IMPULSE_RADIUS );
-
-
-        // ----------------------------------------------------
-        // PREVIOUS BIGGER SPHERE WINS
-        //
-        // Keep RG + B + A together from history.
-        // A smaller current impulse cannot refresh the
-        // lifetime of an older larger sphere.
-        // ----------------------------------------------------
-
-        if( fPrevPower > 0.0f && vPrev.b > fCurrentRadius )
-        {
-            vRetDir = vPrev.rg;
-            fRetRadius = vPrev.b;
-            fRetPower = fPrevPower;
-        }
-        else
-        {
-            vRetDir = vRetDir;
-            fRetRadius = fCurrentRadius;
-            fRetPower = 1.0f;
-        }
-    }
-    else
-    {
-        vRetDir = vPrev.rg;
-        fRetRadius = vPrev.b;
-        fRetPower = fPrevPower;
-    }
-
-
-    // --------------------------------------------------------
-    // FINAL TRAILMAP
-    //
-    // RG = packed non-normalized XY offset
-    // B  = packed impulse radius
-    // A  = power / decay
-    // --------------------------------------------------------
-
-    float4 vRet = float4( 0.0f, 0.0f, 0.0f, 0.0f );
-
-    vRet.rg = vRetDir;
-    vRet.b = fRetRadius;
-    vRet.a = fRetPower;
-
-    return vRet;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+A = worldPos
+↓
+B = (A.xy, 0)
+↓
+sampleB = SamplePoint(B)
+
+IF sampleB is empty
+    RETURN NONE
+
+ELSE
+    C = B + sampleB.xy
+    C.power = sampleB.z
+
+    TEST C
+        R = distance(C, A)
+        Dir = normalize(B - C)
+
+        P1 = C + Dir * R
+        sample P1
+
+        IF P1 == C
+            RETURN C
+
+        ELSE IF P1 is empty
+            C is OUT
+
+        ELSE
+            D1 = P1 + sampleP1.xy
+
+            P2 = C - Dir * R
+            sample P2
+
+            IF P2 == C
+                RETURN C
+
+            ELSE IF P2 is empty
+                C is OUT
+                keep D1
+
+            ELSE IF P2 == D1
+                C is OUT
+                keep D1
+
+            ELSE
+                D2 = P2 + sampleP2.xy
+                C is OUT
+                keep D1 + D2
+
+
+    IF D1 exists
+        TEST D1 with exactly the same function
+        IF inside
+            RETURN D1
+
+    IF D2 exists
+        TEST D2 with exactly the same function
+        IF inside
+            RETURN D2
+
+RETURN NONE
