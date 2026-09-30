@@ -1,3 +1,81 @@
+// ============================================================================
+// TRAIL MAP 3D SEARCH - FIRST VERSION
+// ============================================================================
+//
+// COORDINATE CONVENTION
+//
+// A = original 3D vegetation/pixel point (worldPos)
+// B = vertical projection of A onto trail-map plane Z = 0
+// C = first impulse center reconstructed by sampling trail map at B
+//
+// TrailMap:
+//      R,G = normalized direction from sampled pixel -> impulse center
+//      B   = normalized distance from sampled pixel -> impulse center
+//      A   = impulse power / temporal decay
+//
+// FIRST IDEA:
+//
+//      A
+//      |
+//      |
+//      B ---------------- Z = 0
+//
+// Sample B:
+//
+//      B -> C
+//
+// Calculate:
+//
+//      CA = A - C
+//      distanceCA = length(CA)
+//
+//      CB = normalize(B - C) on the Z=0 plane
+//
+// First test point:
+//
+//      B2 = C + CB * distanceCA
+//
+// Sample B2:
+//
+//      B2 -> C
+//          C is confirmed.
+//          A is inside C.
+//
+//      B2 -> EMPTY
+//          C is OUT using this first approximation.
+//
+//      B2 -> D1
+//          D1 may simply be overwriting C.
+//          Therefore check opposite side:
+//
+//          B3 = C - CB * distanceCA
+//
+//          B3 -> C
+//              C confirmed.
+//
+//          B3 -> EMPTY
+//              C out.
+//              D1 is queued and tested.
+//
+//          B3 -> D1
+//              C out.
+//              D1 queued.
+//
+//          B3 -> D2
+//              C out.
+//              D1 and D2 queued.
+//
+// D1 / D2 use THE EXACT SAME TEST.
+//
+// Example
+
+
+
+
+
+
+
+
 
 //****************
 // PROGRAM
