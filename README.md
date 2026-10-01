@@ -1,3 +1,47 @@
+float4 main(PS_INPUT i) : SV_Target
+{
+float4 vPrev = texHistory.Sample(samplerHistory, i.vTex0 + UV_DISPLACEMENT);
+uint uImpulses = 0;
+float2 vTotalDir = float2(0.0f, 0.0f);
+
+for (uint j = 0; j < NUM_IMPULSES; ++j)
+{
+float2 vDir = vWorld - GET_IMPULSE_POS(j);
+float fSqrDist = 1.0f - saturate(dot(vDir, vDir) * GET_IMPULSE_RCP_RADIUS(j));
+vTotalDir += vDir * fSqrDist;
+uImpulses += (fSqrDist > 0.0f) ? 1 : 0;
+}
+
+float2 vRetDir;
+float fDistance;
+float fRetPower;
+
+if (uImpulses > 0)
+{
+float2 vCenterOffset = vTotalDir / float(uImpulses);
+vRetDir = TrailMap_PackDir(normalize(vCenterOffset));
+fDistance = saturate(length(vCenterOffset) / MAX_IMPULSE_LENGTH);
+fRetPower = 1.0f;
+}
+else
+{
+vRetDir = TrailMap_GetPackedDir(vPrev);
+fDistance = saturate(vPrev.b - DECAY);
+fRetPower = saturate(TrailMap_GetPower(vPrev) - DECAY);
+}
+
+float4 vRet;
+vRet.xy = vRetDir;
+vRet.b = fDistance;
+vRet.a = fRetPower;
+return vRet;
+}
+
+
+
+
+
+
 static const float MIN_POWER         = 0.01f;
 static const float CENTER_EPSILON    = 0.05f;
 static const float CENTER_EPSILON_SQ = CENTER_EPSILON * CENTER_EPSILON;
