@@ -1,3 +1,65 @@
+
+float GetWaterEndFogMask(
+    float3 cameraWS,
+    float3 planeWS,
+    float waterY,
+    float waterEndZ,
+    float fadeDistance,
+    float fogHeight)
+{
+    // Ray through the current pixel.
+    // No normalization necessary.
+    float3 ray = planeWS - cameraWS;
+
+    // Assumes water extends toward +Z.
+    if (ray.z <= 0.00001 || waterEndZ <= cameraWS.z)
+        return 0.0;
+
+    // Intersection with vertical plane Z = waterEndZ.
+    float yAtEnd = cameraWS.y
+        + (waterEndZ - cameraWS.z) * ray.y / ray.z;
+
+    // ABOVE WATER:
+    // White at the edge, fades to black at +fogHeight.
+    if (yAtEnd >= waterY)
+    {
+        return 1.0 - smoothstep(
+            waterY,
+            waterY + fogHeight,
+            yAtEnd
+        );
+    }
+
+    // BELOW EDGE:
+    // Find where the ray intersects the horizontal water.
+    if (ray.y >= -0.00001)
+        return 0.0;
+
+    float zAtWater = cameraWS.z
+        + (waterY - cameraWS.y) * ray.z / ray.y;
+
+    // Last fadeDistance units before the water ends.
+    return smoothstep(
+        waterEndZ - fadeDistance,
+        waterEndZ,
+        zAtWater
+    );
+}
+
+
+
+
+
+
+
+
+
+
+
+-----
+
+
+
 float2 ProjectXY(
     float3 WorldPos,
     float3 CameraPos,
