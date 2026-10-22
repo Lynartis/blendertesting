@@ -1,3 +1,37 @@
+float2 ProjectXY(
+    float3 WorldPos,
+    float3 CameraPos,
+    float PlaneZ,
+    float NoiseScale)
+{
+    float t = (PlaneZ - CameraPos.z) /
+              (WorldPos.z - CameraPos.z);
+
+    float2 xy = lerp(CameraPos.xy, WorldPos.xy, t);
+
+    return xy * NoiseScale;
+}
+
+float2 uv0 = ProjectXY(WorldPos, CameraPos,    0.0, 0.01);
+float2 uv1 = ProjectXY(WorldPos, CameraPos, -100.0, 0.01);
+float2 uv2 = ProjectXY(WorldPos, CameraPos, -200.0, 0.01);
+
+float n0 = NoiseTex.Sample(LinearSampler, uv0).r;
+float n1 = NoiseTex.Sample(LinearSampler, uv1).r;
+float n2 = NoiseTex.Sample(LinearSampler, uv2).r;
+
+
+
+
+
+
+m-----//-
+
+
+
+
+
+
 float4 main(PS_INPUT i) : SV_Target
 {
 float4 vPrev = texHistory.Sample(samplerHistory, i.vTex0 + UV_DISPLACEMENT);
